@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+import sys
+import re
+import argparse
+import os.path
+import tempfile
+
+class Command:
+	def __init__(self, address_left, address_right, option_infos):
+		self.address_left = address_left
+		self.address_right = address_right
+		self.option_infos = option_infos
+		self.address_buffer = []
+		self.no_address = False
+		self.last_execute = False
+		self.exeucute_status = False
+	
+	def addresses_helper(self, input_line_number, input_line, last_line):
+		'''
+		check if this command is executable for current input line with input_line_number
+		if this command have both left and right addresses: only executable within the range [left, right] inclusive
+		if this command have only left addresses: only executable if current input_line = left
+		if this command have no addresses: executable for any input_line
+		last_line for dealing with $ 
+		'''
+		if len(self.address_buffer) == 2:
+			self.address_buffer.clear()
+
+		if self.address_left and self.address_right:
+			if not self.address_buffer:
+		  		if self.address_left.isnumeric():
+		  			if int(self.address_left) == input_line_number:
+		  				self.address_buffer.append(input_line)
+		  		elif "/" in self.address_left:
+	  				if re.search(rf"{self.address_left[1:-1]}", input_line):
+	  					self.address_buffer.append(input_line)
+
+			else:
+		  		if self.address_right.isnumeric():
+		  			if int(self.address_right) == input_line_number:
+		  				self.address_buffer.append(input_line)
+		  			elif int(self.address_right) < input_line_number:
+		  				self.address_right = None
+		  		elif "/" in self.address_right:
+	  				if re.search(rf"{self.address_right[1:-1]}", input_line):
+	  					self.address_buffer.append(input_line)
+		  		elif self.address_right == "$":
+			  		if last_line:
+			  			self.last_execute = True
+			  		else:
+			  			self.last_execute = False
+
+		elif self.address_left: 
+			if self.address_left.isnumeric():
+				if input_line_number == int(self.address_left):
+					self.address_buffer.append(input_line)
+				else:
+					self.address_buffer.clear()
+			elif "$" == self.address_left:
+				if last_line:
+					self.last_execute = True
+				else:
+					self.last_execute = False
+			elif "/" in self.address_left and re.search(rf"{self.address_left[1:-1]}", input_line):
+	  			self.address_buffer.append(input_line)
+			else:
+				self.address_buffer.clear()
+		else:
+			self.no_address = True
+
+
+class Q(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "q"
+
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		exit the program if it is executed
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			print_input_line(input_line_container[0], args.n)
+			sys.exit(0)
+
+
+class P(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "p"
+
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		print current input line if it is executed
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			print_input_line(input_line_container[0], False)
+
+
+class D(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "d"
+		self.terminate = False
+
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		record the terminate status, for process_input to termiante process
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.last_execute or self.address_buffer or self.no_address:
+			#occurred here
+			self.terminate = True
+		else:
+			self.terminate = False
+
+
+class S(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "s"
+
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+			subsitute the text match regex with replace
+			also record the status of change the input_line successfully
+			for t command to check
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		match_regex, replace_regex, g_flag  = self.option_infos[0]
+		count = 0
+		if not g_flag:
+			count = 1
+		if self.address_buffer or self.no_address or self.last_execute:
+			#check if the result str is same as input str to check if a command occurred
+			res_str = re.sub(rf"{match_regex}", rf"{replace_regex}", input_line_container[0], count)
+			if res_str != input_line_container[0]:
+				self.exeucute_status = True
+				input_line_container[0] = res_str
+
+class L(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = ":"
+		self.label = option_infos[0]
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		Label command is non-executable, so this is a dummy function
+		'''
+		pass
+
+
+class B(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "b"
+		self.label = option_infos[0]
+		self.jump = False
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		if it is executable self.jump = True, the process_input will know it should 
+		find a specified command to jump to
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			self.jump = True
+		else:
+			self.jump = False
+	def find_jump_position(self, construted_commands):
+		'''
+		find the jump position
+		if b have a empty label, jump to the end of command
+		if b have a non empty label, find it and jump to it
+		it cannot find the corresponding label command, then it's invalid command
+		'''
+		if not self.label:
+			return len(construted_commands)
+		j = 0
+		found = False
+		index = -1
+		while j < len(construted_commands):
+			command_j = construted_commands[j]
+			if command_j.name == ":" and command_j.label == self.label:
+				if index == -1:
+					found = True
+				index = j
+			j += 1
+		if not found:
+			print("slippy: error", file=sys.stderr)
+			sys.exit(1)	
+		return index
+
+class T(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "t"
+		self.label = option_infos[0]
+		self.jump = False
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		same as B
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			self.jump = True
+		else:
+			self.jump = False
+	def find_jump_position(self, construted_commands, last_s_idx):
+		'''
+		same as B but it should reset the execute_status of s command if it jumps
+
+		'''
+		if not self.label:
+			construted_commands[last_s_idx].exeucute_status = False
+			return len(construted_commands)
+		j = 0
+		found = False
+		index = -1
+		while j < len(construted_commands):
+			command_j = construted_commands[j]
+			if command_j.name == ":" and command_j.label == self.label:
+				if index == -1:
+					construted_commands[last_s_idx].exeucute_status = False
+					found = True
+				index = j
+			j += 1
+		
+		if not found:
+			print("slippy: error", file=sys.stderr)
+			sys.exit(1)
+		return index
+
+class C(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "c"
+		self.str = option_infos[0]
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		change the input line and it should exit the command cycle for this input line
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			input_line_container[0] = self.str
+class I(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "i"
+		self.str = option_infos[0]
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		'insert' a line by print it before current input_line is printed
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			print_input_line(self.str, False)
+class A(Command):
+	def __init__(self, address_left, address_right, option_infos):
+		Command.__init__(self, address_left, address_right, option_infos)
+		self.name = "a"
+		self.str = option_infos[0]
+		self.append = False
+	def exeucute(self, input_line_number, input_line_container, last_line):
+		'''
+		record a append status for process_input to do the append work
+		this command cannot do append by itself
+		'''
+		self.addresses_helper(input_line_number, input_line_container[0], last_line)
+		if self.address_buffer or self.no_address or self.last_execute:
+			self.append = True
+		else:
+			self.append = False
+
+def parse_script(script):
+	'''
+	command structure [addresses]command_char[options]
+	because s a i c : t b both have different options (s is /regex/replace/flag others are just string)
+	and other commands shouldn have nothing after the command_char e.g d, p, q
+	so command_regex is a regex for matching the [addresses]command_char
+	and we will match commands with options by corresponding regex, for instance, regex_for_s_ops is matching s[options]
+	
+	also since the # and ; could appear anyway inside the command script, so the semantic of split multiple commands is
+	1. match the command first, it will match all # and ; inside the command
+	2. remove the comment after command by using positive lookbehind (i.e only remove # related pattern after command is appear)
+	3. split the script by using positive lookbehind (split by the ; right after the matched command)
+	
+	repeat the above process, deal with 1 command for each iteration
+	'''
+	command_regex = r"\s*(((/(?:[^\\/]|\\/)*/)|(\d+|\$))\ *(,\ *((/(?:[^\\/]|\\/)*/)|(\d+|\$))){0,1}){0,1}\ *([dqsp:tbaic])\ *"
+	regex_for_s_ops = r"s(\ *(.)(?:((?!\2)(?:[^\\]|\\(?!\2))|\\\2))*\2(?:((?!\2)(?:[^\\]|\\(?!\2))|\\\2))*\2)(g){0,1}\ *"
+	regex_for_label = r"([:tb]\ *(.*?)\ *)(?:[;\n]|$)"
+	regex_for_str = r"([aic]\ *(.*?)\ *)(?:\n|$)"
+	command_infos = []
+	#remove comments from script
+	script = re.sub(r"(^|\n)#[^\n$]*((?=$)|(?=\n))", r"", script);
+	while script:
+		match = re.match(command_regex, script)
+		option_infos = []
+		command_splitter = ""
+		if match:
+			current_command = match.group()
+			addresses = match.group(1)
+			address_left = match.group(2)
+			address_right = match.group(5)
+			if address_right:
+				address_right = address_right.replace(",", "").strip()
+			command_name = match.group(9)
+			command_splitter = re.escape(current_command)
+			command_infos.append([command_name, addresses, address_left, address_right, option_infos])			
+			if command_name == "s":
+				match = re.search(regex_for_s_ops, script);
+				if match:
+					option = match.group();
+					command_splitter = re.escape(option)
+					delimiter = re.escape(match.group(2))
+					g_flag = match.group(5)
+					match_regex, replace_regex = [re.sub(rf"\\{delimiter}" ,f"{delimiter}", x) for x in re.split(rf"(?<!\\){delimiter}", option.strip())][1:3]						
+					command_infos[-1][4].append([match_regex, replace_regex, g_flag])
+				else:
+					print(f"{sys.argv[0]}: command line: invalid command", file=sys.stderr)
+					sys.exit(1)
+			elif command_name == ":" or command_name == "b" or command_name == "t":
+				if addresses and command_name == ":":
+					print(f"{sys.argv[0]}: command line: invalid command", file=sys.stderr)
+					sys.exit(1)
+				match = re.search(regex_for_label, script)
+				command_splitter = re.escape(match.group(1))
+				label = match.group(2)
+				command_infos[-1][4].append(label)
+			elif command_name == "a" or command_name == "i" or command_name == "c":
+				match = re.search(regex_for_str, script)
+				command_splitter = re.escape(match.group(1))
+				replace_str = match.group(2)
+				command_infos[-1][4].append(replace_str)
+			else:
+				match = re.match(rf"{re.escape(current_command)}(\ *|#.*)([;\n]|$)", script)
+				if not match:
+					print(f"{sys.argv[0]}: command line: invalid command", file=sys.stderr)
+					sys.exit(1)
+
+		#split by newline should be implemented
+		#if command_splitter:
+		script = re.sub(rf"(?<={command_splitter})\ *#[^\n$]*((?=$)|(?=\n))", rf"", script);
+		commands = re.split(rf"(?<={command_splitter})\ *[;\n]\ *", script, maxsplit=1)
+		if len(commands) > 1:
+			script = commands[1]
+		else:
+			script = ""
+	return command_infos
+
+
+def print_input_line(input_line, n_flag):
+	'''
+	print input_line to tmp file or stdout
+	'''
+	if not n_flag:
+		if output_stream != sys.stdout:
+			with open(output_stream.name, "a") as tmp:
+				print(input_line, file=tmp)
+		else:
+			print(input_line)
+
+
+
+def construct_commands(command_infos):
+	'''
+	construct command object by reading command_infos
+	'''
+	constructed_commands = []
+	for command_info in command_infos:
+		command_name, addresses, address_left, address_right, option_infos = command_info
+		if command_name == "q":
+			constructed_commands.append(Q(address_left, address_right, option_infos))
+		if command_name == "p":
+			constructed_commands.append(P(address_left, address_right, option_infos))
+		if command_name == "d":
+			constructed_commands.append(D(address_left, address_right, option_infos))
+		if command_name == "s":
+			constructed_commands.append(S(address_left, address_right, option_infos))
+		if command_name == ":":
+			constructed_commands.append(L(address_left, address_right, option_infos))
+		if command_name == "b":
+			constructed_commands.append(B(address_left, address_right, option_infos))		
+		if command_name == "t":
+			constructed_commands.append(T(address_left, address_right, option_infos))
+		if command_name == "c":
+			constructed_commands.append(C(address_left, address_right, option_infos))
+		if command_name == "i":
+			constructed_commands.append(I(address_left, address_right, option_infos))
+		if command_name == "a":
+			constructed_commands.append(A(address_left, address_right, option_infos))
+	return constructed_commands
+
+
+def process_input(input_line_number, input_line, construted_commands, args, last_line):
+	'''
+	this function will execute all commands on input_line in order of from left to right
+	in a while loop, in each iteration, it will call the exeucute method of current command
+	it may need to do some extra work for some complex command, after all command is executed
+	print the result input line(if it wasn't deleted)
+	2 speical cases: b and t will jump to speical command, and it is achieved by changing 
+	the index variable i.
+	'''
+	input_line_container = [input_line]
+	i = 0
+	last_s_idx = -1
+	append_str = [] 
+	while i < len(construted_commands):
+		command = construted_commands[i]
+		command.exeucute(input_line_number, input_line_container, last_line)
+		if command.name == "d":
+			if command.terminate:
+				break
+		if command.name == "s":
+			last_s_idx = i
+
+		if command.name == "a":
+			if command.append:
+				append_str.append(command.str)
+
+		if command.name == "c":
+			i = len(construted_commands)
+			continue
+		if command.name == "b":
+			if command.jump:
+				i = command.find_jump_position(construted_commands)
+				continue
+		if command.name == "t":
+			if command.jump:
+				if last_s_idx >= 0 and construted_commands[last_s_idx].exeucute_status:
+					i = command.find_jump_position(construted_commands, last_s_idx)
+					if i < len(construted_commands):
+						last_s_idx = -1
+					continue
+		i += 1
+	else:
+		input_line = input_line_container[0]
+		print_input_line(input_line, args.n)
+		if append_str:
+			for line in append_str:
+				print_input_line(line, False)
+
+'''
+Customize the help message and usage error message by overloading
+'''
+class ArgumentParser(argparse.ArgumentParser):    
+    def error(self, message):
+    	self.print_usage(sys.stderr)
+    	sys.exit(1)
+    def print_help(self):
+    	self.print_usage()
+    	sys.exit(0)
+
+
+usage_str = f"{sys.argv[0]} [-i] [-n] [-f <script-file> | <sed-command>] [<files>...]"
+
+parser = ArgumentParser(usage=usage_str)
+parser.add_argument("-i", action="store_true")
+parser.add_argument("-n", action="store_true")
+parser.add_argument("-f")
+parser.add_argument("script", type=str, nargs="?", default="")
+parser.add_argument("input_files", nargs="*")
+
+args = parser.parse_args()
+input_files = []
+
+
+'''
+deal with command-line argument
+arg parser will read first input file as script even if we given a command file
+so we need to check if args.script is a file
+if it's a file, then it should actually be the first input_file
+'''
+if not args.f:
+	script = args.script
+	input_files = args.input_files
+else:
+	if args.script:
+		if not os.path.isfile(args.script):
+			print("slippy: error", file=sys.stderr)
+			sys.exit(1)
+		else:
+			input_files.append(args.script)
+			input_files += args.input_files
+	
+	with open(args.f, "r") as script_file:
+		scripts = script_file.readlines()
+		script = "".join(s for s in scripts)
+
+'''
+given i but not input_files should print usage
+'''
+if args.i and not input_files:
+	parser.print_usage(sys.stderr)
+	exit(1)
+
+
+
+'''
+"a main function", but not a function, 
+keep output_stream as global variable is convenient
+parse_script and constructed commands 
+the default output_stream is stdout
+
+for the files, if -i is given, output_stream change to tmp_files
+and it will be written back to original files
+
+this function read 1 line a head to determine the last line
+for files, if -i is given, the last line of every single file should be 'the last line' 
+if -i is missing, only the last line of the last file should be 'the last line'
+'''
+command_infos = parse_script(script)
+construted_commands = construct_commands(command_infos)
+output_stream = sys.stdout
+if not input_files:
+	prev = None
+	for input_line_number, input_line in enumerate(sys.stdin, start=1):
+		if prev:
+			process_input(input_line_number-1, prev.strip(), construted_commands, args, False)
+		prev = input_line
+	else:
+		process_input(input_line_number, input_line.strip(), construted_commands, args, True)
+else:
+	line_count = 1
+	tmp_file = None
+	for index, file in enumerate(input_files, start=1):
+		if args.i:
+			tmp_file = tempfile.NamedTemporaryFile()
+			output_stream = tmp_file
+
+		with open(file, "r+") as f:
+ 			prev = None
+ 			for input_line_number, input_line in enumerate(f, start=line_count):
+ 				if prev:
+ 					process_input(input_line_number - 1, prev.strip(), construted_commands, args, False)
+ 				prev = input_line
+ 				line_count += 1
+ 			else:
+ 				if not args.i:
+ 					process_input(input_line_number, input_line.strip(), construted_commands, args, len(input_files) == index)
+ 				else:
+ 					process_input(input_line_number, input_line.strip(), construted_commands, args, True)
+
+		if tmp_file:
+			with open(output_stream.name, "r") as tmp:
+				with open(file, "w") as f:
+					for line in tmp:
+						f.write(line)
+
+
